@@ -1,10 +1,14 @@
 {
-  "name": "cursor-plugins",
+  "name": "pstack-personal",
   "owner": {
-    "name": "Cursor",
-    "email": "plugins@cursor.com"
+    "name": "Jared Price"
   },
   "plugins": [
+    {
+      "name": "pstack-organizer",
+      "source": "./pstack-organizer",
+      "description": "Track apps, work commitments, daily priorities, maintenance reviews, and evidence-backed session handoffs across projects."
+    },
     {
       "name": "origin-apps",
       "source": "./origin-apps",

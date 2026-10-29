@@ -1,0 +1,35 @@
+name: Organizer
+
+on:
+  push:
+    paths:
+      - 'pstack-organizer/**'
+      - '.cursor-plugin/marketplace.json'
+      - '.claude-plugin/marketplace.json'
+      - '.github/workflows/organizer.yml'
+  pull_request:
+    paths:
+      - 'pstack-organizer/**'
+      - '.cursor-plugin/marketplace.json'
+      - '.claude-plugin/marketplace.json'
+      - '.github/workflows/organizer.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.12', '3.13']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Check plugin packaging
+        run: python pstack-organizer/scripts/validate_plugin.py
+      - name: Exercise persistent organizer workflows
+        run: python -m unittest discover -s pstack-organizer/tests -v
