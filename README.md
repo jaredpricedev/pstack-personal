@@ -1,11 +1,16 @@
-# Cursor plugins
+# pstack personal
 
-Official Cursor plugins for popular developer tools, frameworks, and SaaS products. Each plugin is a standalone directory at the repository root with its own `.cursor-plugin/plugin.json` manifest.
+This fork of [cursor/plugins](https://github.com/cursor/plugins) adds [pstack organizer](pstack-organizer/): persistent app records, tasks, daily planning, maintenance reviews, and session handoffs. Upstream pstack and its harness are retained unchanged.
+
+Start with the [organizer setup and usage guide](pstack-organizer/README.md), then run `/setup-organizer` and `/jared-mode` in your agent host. Personal and work records stay outside this repository.
+
+The fork marketplace is named `pstack-personal` to coexist with `cursor-plugins`. The original plugin collection is retained below; each plugin is a standalone directory with its own manifest.
 
 ## Plugins
 
 | `name` | Plugin | Author | Category | `description` (from marketplace) |
 |:-------|:-------|:-------|:---------|:-------------------------------------|
+| `pstack-organizer` | [pstack organizer](pstack-organizer/) | Jared Price | Developer Tools | Track apps, work commitments, daily priorities, maintenance reviews, and evidence-backed session handoffs across projects. |
 | `teaching` | [Teaching](teaching/) | Cursor | Utilities | Skill mapping, practice plans, and learning retrospectives. |
 | `continual-learning` | [Continual Learning](continual-learning/) | Eric Zakariasson | Developer Tools | Incremental transcript-driven memory updates for AGENTS.md using high-signal bullet points only. |
 | `cursor-team-kit` | [Cursor Team Kit](cursor-team-kit/) | Eric Zakariasson | Developer Tools | Internal team workflows for CI, code review, shipping, local automation, and verification. |

@@ -1,0 +1,26 @@
+{
+  "name": "pstack-organizer",
+  "version": "0.1.0",
+  "description": "Track apps, work commitments, daily priorities, maintenance reviews, and evidence-backed session handoffs across projects.",
+  "author": {
+    "name": "Jared Price"
+  },
+  "homepage": "https://github.com/jaredpricedev/pstack-personal/tree/main/pstack-organizer",
+  "repository": "https://github.com/jaredpricedev/pstack-personal",
+  "license": "MIT",
+  "keywords": [
+    "pstack",
+    "organization",
+    "tasks",
+    "planning",
+    "handoffs"
+  ],
+  "displayName": "pstack organizer",
+  "category": "developer-tools",
+  "tags": [
+    "workflow",
+    "planning",
+    "maintenance"
+  ],
+  "skills": "./skills/"
+}
