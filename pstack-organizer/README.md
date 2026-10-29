@@ -6,17 +6,22 @@ The organizer works offline with Python 3.10 or newer and its standard library. 
 
 ## Install
 
+### Grok Bot
+
+Use the [Grok Bot setup guide](docs/grok-bot.md). It runs the CLI on the Bot's cloud computer and saves a private skill that loads the organizer workflows. Keep its data under `/workspace/pstack-organizer-data`, outside the checkout, and invoke the saved skill by name. This is a CLI plus private-skill setup; native GitHub-plugin import in Grok Bot has not been verified.
+
 ### Cursor
 
-For a local installation, clone this fork and link the companion into Cursor's local plugin directory:
+For a local installation, clone this fork and copy the companion into Cursor's local plugin directory:
 
 ```bash
 git clone https://github.com/jaredpricedev/pstack-personal.git
 mkdir -p ~/.cursor/plugins/local
-ln -s "$PWD/pstack-personal/pstack-organizer" ~/.cursor/plugins/local/pstack-organizer
+test ! -e ~/.cursor/plugins/local/pstack-organizer && \
+  cp -R "$PWD/pstack-personal/pstack-organizer" ~/.cursor/plugins/local/pstack-organizer
 ```
 
-Reload Cursor after linking. If local plugin imports are disabled by your organization, use its approved marketplace process. Do not replace an existing plugin directory with this command. On Windows, copy the `pstack-organizer` folder to your user profile's `.cursor/plugins/local/` directory instead of using `ln`.
+Reload Cursor after copying. Cursor skips symlinks whose targets are outside its local plugin directory. If local plugin imports are disabled by your organization, use its approved marketplace process. If the destination already exists, the command leaves it alone; review it before updating. On Windows, copy the `pstack-organizer` folder to your user profile's `.cursor/plugins/local/` directory.
 
 Keep your existing pstack installation for engineering work. If it is not installed, install pstack from the official marketplace. The organizer itself does not require pstack; `jared-mode` uses it when you request implementation work.
 
@@ -31,7 +36,7 @@ This fork has its own marketplace name so it can coexist with the upstream marke
 
 Claude Code prefixes the commands, for example `/pstack-organizer:today` and `/pstack-organizer:jared-mode`. Install the base pstack plugin separately if you want to use its engineering playbooks. For a temporary local session, Claude Code can load the `pstack-organizer` directory as a plugin directory.
 
-Plugin packaging is provided for Cursor and Claude Code. Other agents can run the CLI directly and read the skills as instructions; installing this repository does not add persistent memory to ChatGPT.
+Plugin packaging is provided for Cursor and Claude Code. Grok Bot can use the CLI and a private skill as described above. Installing this repository does not add persistent memory to ChatGPT.
 
 ## Start using it
 
