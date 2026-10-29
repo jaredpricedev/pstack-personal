@@ -1,7 +1,7 @@
 {
   "name": "pstack-organizer",
-  "version": "0.1.0",
-  "description": "Track apps, work commitments, daily priorities, maintenance reviews, and evidence-backed session handoffs across projects.",
+  "version": "0.2.0",
+  "description": "Build and maintain apps with durable work notes, tasks, morning check-ins, maintenance reviews, and session handoffs.",
   "author": {
     "name": "Jared Price"
   },

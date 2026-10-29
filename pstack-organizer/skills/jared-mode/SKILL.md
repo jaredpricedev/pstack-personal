@@ -1,6 +1,6 @@
 ---
 name: jared-mode
-description: "Work across apps with durable task capture and verified session handoffs, routing engineering execution through pstack when available. Use for /jared-mode or a request to keep the user's app work organized while executing it."
+description: "Build and maintain several apps while remembering work context, tasks, and session handoffs. Use for /jared-mode or keeping app delivery and daily work organized while executing it."
 ---
 
 # Jared mode
@@ -15,15 +15,17 @@ Read [state and workflows](../../references/state-and-workflows.md). Resolve com
    | Request | Workflow |
    | --- | --- |
    | Register apps or configure a workspace | setup-organizer |
+   | Morning greeting or daily catch-up | morning |
    | Remember a commitment, idea, or follow-up | capture-task |
+   | Remember or recall a fact, decision, or work detail | remember-work |
    | Choose today's next actions | today |
    | Continue a project | resume-app |
    | Review maintenance needs | maintain-app |
    | Save progress or switch projects | close-session |
 
 3. For engineering execution, locate installed upstream pstack using the host's plugin/skill discovery and its manifest name. Read its relevant workflow before using it. Do not assume a sibling `pstack/` directory exists after installation. If pstack is absent, use the host's ordinary engineering tools; local organizer functions remain available.
-4. Carry out authorized work with the project's constraints and verification profile. Prefer a concrete next action to a broad new plan. Ask only for material missing intent, access, or an action that requires permission. Do not infer authority to deploy, merge, send messages, or widen access from a maintenance profile.
-5. During the active mode, capture explicit commitments and loose ends at safe boundaries. Distinguish suggestions from promises. Include provenance, avoid duplicate records, and do not invent deadlines or completion. Do not let an optional organizer update block urgent work; report a failed save and retry at the next safe boundary.
+4. Carry out authorized work with the project's constraints and verification profile. Support new app delivery as well as maintenance: recover the target outcome, choose the next useful increment, execute it through the engineering workflow, and retain the next action. Retrieve relevant saved decisions before changing direction. Ask only for material missing intent, access, or an action that requires permission. Do not infer authority to deploy, merge, send messages, or widen access from a maintenance profile.
+5. During the active mode, capture explicit commitments and loose ends at safe boundaries. Use remember-work for durable facts and decisions rather than disguising them as tasks. Distinguish suggestions from promises. Include provenance, avoid duplicate records, and do not invent deadlines or completion. Do not let an optional organizer update block urgent work; report a failed save and retry at the next safe boundary.
 6. Save a handoff through close-session after meaningful progress, before a project switch, and before the final response when app state changed. Update only facts established by the session. Keep the next action useful even when work is blocked or incomplete.
 7. Reply plainly with the outcome, relevant evidence, remaining work, and saved task/checkpoint references. State any persistence failure directly. Keep routine implementation detail out of the user's planning view.
 

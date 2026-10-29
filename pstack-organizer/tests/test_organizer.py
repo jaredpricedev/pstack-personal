@@ -5,6 +5,7 @@ from datetime import date
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,43 @@ import unittest
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "organizer.py"
+
+
+def legacy_snapshot():
+    """A schema-1 export fixture, independent of the current runtime serializer."""
+    stamp = "2026-10-28T12:00:00.000000Z"
+    app = {
+        "id": "legacy", "name": "Legacy app", "purpose": "Maintain the legacy app",
+        "repos": ["https://github.com/example/legacy"], "path": None, "stage": "active",
+        "next_action": "Inspect the remaining failure", "constraints": [],
+        "verify": ["Run smoke checks"], "maintenance": [], "created_at": stamp, "updated_at": stamp,
+    }
+    capture = {
+        "app_id": "legacy", "title": "Review a legacy change", "kind": "commitment",
+        "status": "todo", "priority": "normal", "source": "User request", "next_action": None,
+        "due": None, "follow_up": None, "waiting_on": None, "depends_on": [], "external": None,
+        "key": "legacy-review", "estimate": 30, "estimate_source": "default", "evidence": [],
+    }
+    task = {
+        "id": "task-legacy", **capture, "status": "doing",
+        "next_action": "Inspect the remaining failure", "created_at": stamp, "updated_at": stamp,
+    }
+    checkpoint = {
+        "id": "checkpoint-legacy", "app_id": "legacy", "summary": "Change under review",
+        "next_action": "Inspect the remaining failure", "branch": "review/legacy", "commit": None,
+        "pr": None, "decisions": ["Keep deployment manual"], "evidence": ["Smoke checks recorded"],
+        "key": None, "created_at": stamp, "updated_at": stamp,
+    }
+    review = {
+        "id": "review-legacy", "app_id": "legacy", "summary": "Initial review complete",
+        "findings": ["One check remains"], "evidence": ["Review record"], "key": None,
+        "created_at": stamp, "updated_at": stamp,
+    }
+    return {
+        "schema_version": 1, "workspace": "legacy", "exported_at": stamp,
+        "apps": [app], "tasks": [task], "checkpoints": [checkpoint], "reviews": [review],
+        "capture_requests": {"tasks": {"legacy-review": capture}, "checkpoints": {}, "reviews": {}},
+    }
 
 
 class OrganizerCLI(unittest.TestCase):
@@ -60,11 +98,40 @@ class OrganizerCLI(unittest.TestCase):
         path.write_text(json.dumps(snapshot), encoding="utf-8")
         return path
 
+    def note(self, title="Work context", *arguments, **options):
+        return self.run_cli("note", "add", title, "--body", "Context to preserve",
+                            "--source", "User statement", *arguments, **options)
+
+    def create_legacy_database(self, workspace="legacy-db"):
+        snapshot = legacy_snapshot()
+        directory = self.home / workspace
+        directory.mkdir(parents=True)
+        database = directory / "state.sqlite3"
+        with sqlite3.connect(database) as connection:
+            connection.execute("CREATE TABLE apps (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
+            for table in ("tasks", "checkpoints", "reviews"):
+                connection.execute(
+                    f"CREATE TABLE {table} (id TEXT PRIMARY KEY, app_id TEXT REFERENCES apps(id), "
+                    "capture_key TEXT UNIQUE, request TEXT, body TEXT NOT NULL)"
+                )
+            for app in snapshot["apps"]:
+                connection.execute("INSERT INTO apps VALUES (?,?)", (app["id"], json.dumps(app)))
+            for table in ("tasks", "checkpoints", "reviews"):
+                for row in snapshot[table]:
+                    request = snapshot["capture_requests"][table].get(row["key"])
+                    connection.execute(f"INSERT INTO {table} VALUES (?,?,?,?,?)", (
+                        row["id"], row["app_id"], row["key"],
+                        json.dumps(request, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+                        if request is not None else None, json.dumps(row),
+                    ))
+            connection.execute("PRAGMA user_version = 1")
+        return database, snapshot
+
     def test_init_is_idempotent_and_read_does_not_create_missing_store(self):
         first = self.run_cli("init")
         second = self.run_cli("init")
         self.assertEqual(first, second)
-        self.assertEqual(first["schema_version"], 1)
+        self.assertEqual(first["schema_version"], 2)
         missing_home = self.directory / "missing"
         self.reject("task", "list", home=missing_home)
         self.assertFalse(missing_home.exists())
@@ -283,7 +350,7 @@ class OrganizerCLI(unittest.TestCase):
         path = self.write_snapshot(snapshot)
         self.run_cli("init", workspace="restored")
         result = self.run_cli("import", "--file", path, workspace="restored")
-        self.assertEqual(result["imported"], {"apps": 1, "tasks": 1, "checkpoints": 1, "reviews": 1})
+        self.assertEqual(result["imported"], {"apps": 1, "tasks": 1, "checkpoints": 1, "reviews": 1, "notes": 0})
         restored = self.run_cli("export", workspace="restored")
         for collection in ("apps", "tasks", "checkpoints", "reviews"):
             self.assertEqual(snapshot[collection], restored[collection], collection)
@@ -333,6 +400,257 @@ class OrganizerCLI(unittest.TestCase):
         broken["tasks"][0]["depends_on"] = [second["id"]]
         self.reject("import", "--file", self.write_snapshot(broken), workspace="untrusted-import")
         self.assertEqual(self.run_cli("task", "list", workspace="untrusted-import"), [])
+
+    def test_note_persists_content_and_provenance_without_creating_a_task(self):
+        note = self.run_cli("note", "add", "Repository convention", "--body",
+                            "Use the Shared repository for proposals", "--source", "User statement")
+        self.assertEqual(note["kind"], "context")
+        self.assertEqual(note["status"], "current")
+        self.assertIsNone(note["app_id"])
+        self.assertIsNone(note["review_on"])
+        self.assertIsNone(note["supersedes"])
+        self.assertEqual(self.run_cli("note", "show", note["id"]), note)
+        self.assertEqual(self.run_cli("note", "list"), [note])
+        self.assertEqual(self.run_cli("task", "list"), [])
+
+    def test_notes_filter_by_app_kind_and_case_insensitive_text_sources(self):
+        self.app("demo")
+        self.app("other")
+        scoped = self.run_cli("note", "add", "Migration DECISION", "--body", "Keep manual review",
+                              "--source", "Architecture review ABC-42", "--app", "demo", "--kind", "decision")
+        other = self.note("Other app context", "--app", "other")
+        general = self.note("General context")
+        self.assertEqual([n["id"] for n in self.run_cli("note", "list", "--app", "demo")], [scoped["id"]])
+        self.assertEqual([n["id"] for n in self.run_cli("note", "list", "--kind", "decision")], [scoped["id"]])
+        for query in ("migration decision", "MANUAL REVIEW", "abc-42"):
+            with self.subTest(query=query):
+                self.assertEqual([n["id"] for n in self.run_cli("note", "list", "--query", query)],
+                                 [scoped["id"]])
+        self.assertEqual({n["id"] for n in self.run_cli("note", "list")},
+                         {scoped["id"], other["id"], general["id"]})
+
+    def test_notes_stay_in_the_selected_workspace(self):
+        personal = self.note("Personal workspace context")
+        self.run_cli("init", workspace="work")
+        work = self.note("Work workspace context", workspace="work")
+        self.assertEqual([n["id"] for n in self.run_cli("note", "list")], [personal["id"]])
+        self.assertEqual([n["id"] for n in self.run_cli("note", "list", workspace="work")], [work["id"]])
+        self.reject("note", "show", personal["id"], workspace="work")
+
+    def test_note_rejects_missing_provenance_invalid_dates_and_unknown_app(self):
+        self.reject("note", "add", "Missing source", "--body", "Some context")
+        self.reject("note", "add", "Blank source", "--body", "Some context", "--source", " ")
+        self.reject("note", "add", "Blank context", "--body", " ", "--source", "User statement")
+        self.reject("note", "add", "Blank title", "--body", "Context", "--source", "User statement",
+                    "--review-on", "2026-02-30")
+        self.reject("note", "add", "Unknown app", "--body", "Context", "--source", "User statement",
+                    "--app", "not-registered")
+        self.assertEqual(self.run_cli("note", "list"), [])
+
+    def test_note_correction_keeps_original_content_and_supersedes_only_its_status(self):
+        self.app("demo")
+        original = self.note("Original decision", "--app", "demo", "--kind", "decision")
+        correction = self.run_cli("note", "add", "Updated decision", "--body", "Use the revised process",
+                                  "--source", "User correction", "--kind", "decision", "--app", "demo",
+                                  "--supersedes", original["id"])
+        saved_original = self.run_cli("note", "show", original["id"])
+        self.assertEqual(saved_original["status"], "superseded")
+        for key in ("id", "title", "body", "source", "kind", "created_at"):
+            self.assertEqual(saved_original[key], original[key], key)
+        self.assertEqual(correction["supersedes"], original["id"])
+        self.assertEqual(correction["status"], "current")
+        self.assertEqual(self.run_cli("note", "list"), [correction])
+        self.assertEqual([n["id"] for n in self.run_cli("note", "list", "--status", "superseded")],
+                         [original["id"]])
+
+    def test_failed_note_corrections_leave_original_current(self):
+        self.app("demo")
+        self.app("other")
+        original = self.note("Keep this decision", "--app", "demo")
+        for app in (None, "other"):
+            arguments = ["note", "add", "Wrong scope", "--body", "Correction", "--source", "User correction",
+                         "--supersedes", original["id"]]
+            if app:
+                arguments += ["--app", app]
+            self.reject(*arguments)
+        self.reject("note", "add", "Bad review date", "--body", "Correction", "--source", "User correction",
+                    "--app", "demo", "--supersedes", original["id"], "--review-on", "2026-02-30")
+        self.assertEqual(self.run_cli("note", "show", original["id"]), original)
+        self.assertEqual(self.run_cli("note", "list"), [original])
+
+    def test_keyed_correction_retry_returns_same_record_after_target_was_superseded(self):
+        original = self.note("Initial convention")
+        arguments = ("note", "add", "Corrected convention", "--body", "Revised context",
+                     "--source", "User correction", "--supersedes", original["id"], "--key", "correction-1")
+        first = self.run_cli(*arguments)
+        self.assertEqual(self.run_cli(*arguments), first)
+        self.reject("note", "add", "Different correction", "--body", "Revised context",
+                    "--source", "User correction", "--supersedes", original["id"], "--key", "correction-1")
+        self.assertEqual(len(self.run_cli("export")["notes"]), 2)
+        self.assertEqual(self.run_cli("note", "show", original["id"])["status"], "superseded")
+
+    def test_archive_is_idempotent_and_prevents_later_correction(self):
+        note = self.note("Historical context", "--key", "historical-context")
+        archived = self.run_cli("note", "archive", note["id"])
+        self.assertEqual(archived["status"], "archived")
+        self.assertEqual(self.run_cli("note", "archive", note["id"]), archived)
+        self.assertEqual(self.note("Historical context", "--key", "historical-context"), archived)
+        self.assertEqual(self.run_cli("note", "list"), [])
+        self.assertEqual(self.run_cli("note", "list", "--status", "archived"), [archived])
+        self.reject("note", "add", "Replacement", "--body", "New context", "--source", "User correction",
+                    "--supersedes", note["id"])
+
+    def test_morning_combines_plan_and_app_handoffs_without_mutating_records(self):
+        self.app("demo")
+        self.app("other")
+        small = self.task("Small ready task", "--app", "demo", "--estimate", "15")
+        self.task("Large ready task", "--app", "other", "--estimate", "90")
+        finished = self.task("Finished task", "--app", "demo")
+        self.run_cli("task", "update", finished["id"], "--status", "done", "--evidence", "Verified")
+        checkpoint = self.run_cli("checkpoint", "add", "demo", "--summary", "Startup works",
+                                  "--next-action", "Inspect the UI", "--evidence", "Startup test passed")
+        review = self.run_cli("review", "add", "demo", "--summary", "Review complete", "--evidence", "CI inspected")
+        before = self.run_cli("export")
+        report = self.run_cli("morning", "--date", "2026-10-28", "--limit", "1", "--minutes", "20")
+        self.assertEqual(report["coverage"], "ledger-only")
+        self.assertEqual(report["date"], "2026-10-28")
+        self.assertEqual(report["workspace"], "personal")
+        self.assertEqual([task["id"] for task in report["plan"]["picked"]], [small["id"]])
+        self.assertEqual(report["plan"], self.run_cli("today", "--date", "2026-10-28",
+                                                     "--limit", "1", "--minutes", "20"))
+        apps = {row["app"]["id"]: row for row in report["apps"]}
+        self.assertEqual(set(apps), {"demo", "other"})
+        self.assertEqual(apps["demo"]["checkpoint"]["id"], checkpoint["id"])
+        self.assertEqual(apps["demo"]["review"]["id"], review["id"])
+        self.assertEqual(apps["demo"]["open_task_count"], 1)
+        self.assertIsNone(apps["other"]["checkpoint"])
+        self.assertIsNone(apps["other"]["review"])
+        after = self.run_cli("export")
+        for field in ("apps", "tasks", "checkpoints", "reviews", "notes", "capture_requests"):
+            self.assertEqual(before[field], after[field], field)
+
+    def test_morning_only_surfaces_current_notes_due_for_review(self):
+        overdue = self.note("Overdue review", "--review-on", "2026-10-20")
+        due = self.note("Review today", "--review-on", "2026-10-28")
+        self.note("Review next week", "--review-on", "2026-11-02")
+        self.note("No review date")
+        archived = self.note("Archived due note", "--review-on", "2026-10-20")
+        self.run_cli("note", "archive", archived["id"])
+        original = self.note("Superseded due note", "--review-on", "2026-10-20")
+        self.note("Replacement for future review", "--review-on", "2026-11-02", "--supersedes", original["id"])
+        report = self.run_cli("morning", "--date", "2026-10-28")
+        self.assertEqual({note["id"] for note in report["notes_to_review"]}, {overdue["id"], due["id"]})
+
+    def test_morning_respects_workspace_and_does_not_initialize_missing_store(self):
+        self.app("demo")
+        self.note("Personal context", "--review-on", "2026-10-20")
+        self.run_cli("init", workspace="work")
+        work = self.note("Work context", "--review-on", "2026-10-20", workspace="work")
+        report = self.run_cli("morning", "--date", "2026-10-28", workspace="work")
+        self.assertEqual(report["apps"], [])
+        self.assertEqual([note["id"] for note in report["notes_to_review"]], [work["id"]])
+        missing = self.directory / "uninitialized"
+        self.reject("morning", "--date", "2026-10-28", home=missing)
+        self.assertFalse(missing.exists())
+        self.reject("morning", "--date", "not-a-date")
+
+    def test_explicit_init_migrates_real_schema_one_database_without_losing_state(self):
+        database, snapshot = self.create_legacy_database()
+        error = self.reject("app", "list", workspace="legacy-db")
+        self.assertIn("init", error["error"].lower())
+        with sqlite3.connect(database) as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
+        migrated = self.run_cli("init", workspace="legacy-db")
+        self.assertEqual(migrated["schema_version"], 2)
+        self.assertEqual(self.run_cli("init", workspace="legacy-db"), migrated)
+        exported = self.run_cli("export", workspace="legacy-db")
+        for field in ("apps", "tasks", "checkpoints", "reviews"):
+            self.assertEqual(exported[field], snapshot[field], field)
+        self.assertEqual(exported["notes"], [])
+        retried = self.task("Review a legacy change", "--app", "legacy", "--key", "legacy-review",
+                            workspace="legacy-db")
+        self.assertEqual(retried["id"], "task-legacy")
+        self.assertEqual(retried["status"], "doing")
+        self.note("New schema supports notes", workspace="legacy-db")
+        self.assertEqual(len(self.run_cli("note", "list", workspace="legacy-db")), 1)
+
+    def test_v1_snapshot_import_preserves_old_records_and_capture_retry_metadata(self):
+        snapshot = legacy_snapshot()
+        self.run_cli("init", workspace="import-v1")
+        result = self.run_cli("import", "--file", self.write_snapshot(snapshot), workspace="import-v1")
+        self.assertEqual(result["imported"], {"apps": 1, "tasks": 1, "checkpoints": 1, "reviews": 1, "notes": 0})
+        exported = self.run_cli("export", workspace="import-v1")
+        self.assertEqual(exported["schema_version"], 2)
+        self.assertEqual(exported["notes"], [])
+        for field in ("apps", "tasks", "checkpoints", "reviews"):
+            self.assertEqual(exported[field], snapshot[field], field)
+        retry = self.task("Review a legacy change", "--app", "legacy", "--key", "legacy-review",
+                          workspace="import-v1")
+        self.assertEqual(retry["status"], "doing")
+
+    def test_v2_notes_roundtrip_preserves_correction_history_and_keyed_retries(self):
+        self.app("demo")
+        original = self.note("Initial process", "--app", "demo", "--review-on", "2026-10-20")
+        arguments = ("note", "add", "Corrected process", "--body", "Apply the revised convention",
+                     "--source", "User correction", "--app", "demo", "--supersedes", original["id"],
+                     "--key", "process-correction", "--review-on", "2026-10-28")
+        correction = self.run_cli(*arguments)
+        snapshot = self.run_cli("export")
+        self.assertEqual(snapshot["schema_version"], 2)
+        self.run_cli("init", workspace="restored-notes")
+        self.run_cli("import", "--file", self.write_snapshot(snapshot), workspace="restored-notes")
+        restored = self.run_cli("export", workspace="restored-notes")
+        self.assertEqual(restored["notes"], snapshot["notes"])
+        self.assertEqual(restored["capture_requests"], snapshot["capture_requests"])
+        self.assertEqual(self.run_cli(*arguments, workspace="restored-notes"), correction)
+        self.assertEqual(self.run_cli("note", "show", original["id"], workspace="restored-notes")["status"],
+                         "superseded")
+
+    def test_note_import_rejects_bad_correction_graphs_without_partial_writes(self):
+        self.app("demo")
+        self.app("other")
+        original = self.note("Original convention", "--app", "demo")
+        successor = self.note("New convention", "--app", "demo", "--supersedes", original["id"])
+        snapshot = self.run_cli("export")
+        self.run_cli("init", workspace="bad-notes")
+        for case in ("missing-parent", "cross-app", "cycle", "current-parent"):
+            broken = json.loads(json.dumps(snapshot))
+            by_id = {note["id"]: note for note in broken["notes"]}
+            if case == "missing-parent":
+                by_id[successor["id"]]["supersedes"] = "note-not-present"
+            elif case == "cross-app":
+                by_id[successor["id"]]["app_id"] = "other"
+            elif case == "cycle":
+                by_id[original["id"]]["supersedes"] = successor["id"]
+            else:
+                by_id[original["id"]]["status"] = "current"
+            with self.subTest(case=case):
+                self.reject("import", "--file", self.write_snapshot(broken), workspace="bad-notes")
+                self.assertEqual(self.run_cli("app", "list", workspace="bad-notes"), [])
+                self.assertEqual(self.run_cli("note", "list", workspace="bad-notes"), [])
+
+    def test_unsupported_database_schema_cannot_be_silently_reinitialized(self):
+        self.note("Keep this note")
+        database = Path(self.run_cli("init")["path"])
+        with sqlite3.connect(database) as connection:
+            connection.execute("PRAGMA user_version = 999")
+        self.reject("init")
+        self.reject("note", "list")
+        with sqlite3.connect(database) as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 999)
+            self.assertEqual(connection.execute("SELECT count(*) FROM notes").fetchone()[0], 1)
+
+    def test_concurrent_corrections_cannot_create_two_current_successors(self):
+        original = self.note("One current convention")
+        def correct(index):
+            return self.invoke("note", "add", "Correction %d" % index, "--body", "Revised convention",
+                               "--source", "User correction", "--supersedes", original["id"])
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(correct, range(2)))
+        self.assertEqual(sum(result.returncode == 0 for result in results), 1)
+        self.assertEqual(len(self.run_cli("note", "list")), 1)
+        self.assertEqual(len(self.run_cli("export")["notes"]), 2)
+        self.assertEqual(self.run_cli("note", "show", original["id"])["status"], "superseded")
 
     def test_parallel_captures_and_retries_do_not_lose_tasks(self):
         def capture(index):
