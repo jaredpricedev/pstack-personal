@@ -2,6 +2,8 @@
 
 Run the existing CLI on Grok Bot's cloud computer and save a private skill that loads the local workflows. This adapts the organizer to Grok Bot's documented command-line and private-skill capabilities. It has not been exercised in a live Grok Bot session, and it does not assume native GitHub-plugin import or Cursor/Claude slash commands are available there.
 
+For engineering work, first add [official pstack for Grok Bot](https://x.ai/bot/plugin/9717366) through its **Add to Grok Bot** page. Then set up this companion. Official pstack supplies engineering workflows; the companion stores your app state, work notes, and daily planning records.
+
 ## Ask your Bot to set it up
 
 Paste this into the Grok Bot you want to use:
@@ -13,12 +15,12 @@ Clone the repository into /workspace/pstack-personal if that path is unused. If 
 
 Use /workspace/pstack-organizer-data as the data home and personal as the workspace. Always pass both flags explicitly before every CLI subcommand. Initialize the store without inventing any tasks or importing my other repositories.
 
-Save a private skill named Personal App Organizer. Its instructions should load /workspace/pstack-personal/pstack-organizer/skills/jared-mode/SKILL.md and its referenced companion workflows on each invocation. Retain the absolute script path and explicit data-home/workspace flags in that skill. Use the current conversation's date and timezone for planning.
+Save or update a private skill named Personal App Organizer. Its instructions should load /workspace/pstack-personal/pstack-organizer/skills/jared-mode/SKILL.md and its referenced companion workflows on each invocation. Retain the absolute script path and explicit data-home/workspace flags in that skill. Use the current conversation's date and timezone for planning. Route morning greetings to the morning workflow, work facts and decisions to remember-work, and actions to capture-task.
 
 Test persistence with a clearly labeled sample in a separate install-check workspace: capture one task, then read it with a separate CLI invocation. Keep the sample out of personal. Report the installed commit, Python version, test outcome, data location, and saved private-skill name. If a step is unavailable, say what failed instead of claiming setup completed.
 ```
 
-This creates local organizer records and a reusable private skill. It does not publish a skill, create scheduled routines, register your apps automatically, or install the separate upstream pstack workflows.
+This creates local organizer records and a reusable private skill. It does not publish a skill, create scheduled routines, or register your apps automatically. If the companion was already installed, update its checkout while preserving local changes, then run init with the same home/workspace to migrate the existing database. Updating the private skill should preserve its chosen data location.
 
 ## CLI paths to retain in the private skill
 
@@ -32,7 +34,7 @@ python3 /workspace/pstack-personal/pstack-organizer/scripts/organizer.py \
   --home /workspace/pstack-organizer-data --workspace personal app list
 
 python3 /workspace/pstack-personal/pstack-organizer/scripts/organizer.py \
-  --home /workspace/pstack-organizer-data --workspace personal today
+  --home /workspace/pstack-organizer-data --workspace personal morning
 ```
 
 Run the tests from the checkout root:
@@ -49,7 +51,9 @@ Ask by name rather than assuming `/today` or `/plugin` commands are registered:
 
 ```text
 Use Personal App Organizer to register the apps I select.
+Use Personal App Organizer for my morning check-in. Catch me up on my apps and work.
 Use Personal App Organizer to remember that I need to ask about the rollout window.
+Use Personal App Organizer to remember why we chose this API design.
 Use Personal App Organizer to plan my next 90 minutes.
 Use Personal App Organizer to resume service-a.
 Use Personal App Organizer to save where we stopped.
@@ -68,6 +72,8 @@ All Bots on the same account share a cloud computer and its files. Workspace lab
 For a portable snapshot, ask the Bot to run `export` with the same explicit flags and save the JSON to a private location under `/workspace` outside the checkout. The existing [export/import workflow](../README.md#workspaces-and-storage) applies. A snapshot is not a second live ledger. Updates or recovery can interrupt running work and lose very recent changes, so do not promise lossless recovery from a chat summary or an unsaved session.
 
 Do not schedule anything during installation. If you later request a daily brief, Grok Bot can create a routine that invokes this private skill with the same data home and workspace. Check the routine's saved timezone and run it once before relying on it.
+
+For a conversational morning check-in, just ask the Bot to use Personal App Organizer. It reviews saved app progress, unfinished commitments, waiting follow-ups, and notes to revisit. Tell it what changed or what matters today, then choose the app or action to work on. The briefing itself does not start engineering work or claim every app was checked live.
 
 ## Update or recover
 

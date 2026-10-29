@@ -1,6 +1,6 @@
 # pstack organizer
 
-Keep your apps, work commitments, and next steps together across coding sessions. This companion adds durable organization to [pstack](../pstack/) without changing its engineering workflows.
+Build and maintain several apps while keeping work commitments, decisions, and next steps together across sessions. This companion adds durable organization to [pstack](../pstack/) without changing its engineering workflows.
 
 The organizer works offline with Python 3.10 or newer and its standard library. Agent skills turn ordinary requests into updates to a local SQLite store. The CLI works independently of any agent or plugin host.
 
@@ -44,6 +44,8 @@ Run `/setup-organizer` to register the apps you want to track. It records curren
 
 | Command | Result |
 | --- | --- |
+| `/morning` | Review recorded app progress, today's priorities, due follow-ups, and work notes to revisit. |
+| `/remember-work` | Save or recall work facts, decisions, and context with their sources. |
 | `/capture-task` | Save an explicit commitment, idea, blocker, or follow-up, with its source. |
 | `/today` | Get a short worklist with reasons, plus overdue work and follow-ups. |
 | `/resume-app` | Recover an app's checkpoint, open work, evidence, and next action. |
@@ -51,11 +53,15 @@ Run `/setup-organizer` to register the apps you want to track. It records curren
 | `/close-session` | Save progress, decisions, verification evidence, and unfinished commitments. |
 | `/jared-mode` | Combine these workflows with pstack while the mode is active. |
 
+For a daily conversation, start with **“Good morning. Catch me up on my apps and work.”** In Grok Bot, ask **“Use Personal App Organizer for my morning check-in.”** It starts with a short briefing, accepts new updates, and helps you choose what to build or maintain next. The check-in reads saved records first; it reports live checks only when they were actually performed. Starting the briefing does not automatically execute the recommended tasks.
+
 Examples you can say to the agent:
 
 ```text
 /capture-task Remind me to ask the architect about the deployment constraint.
 /capture-task This dashboard redesign is an idea, not a commitment yet.
+/remember-work We chose the simpler API so operators can inspect the result directly.
+/morning I have 90 minutes. Catch me up before we start.
 /today I have 90 minutes. What should I work on?
 /resume-app demo
 /maintain-app demo Review open PRs and what needs verification.
@@ -63,6 +69,8 @@ Examples you can say to the agent:
 ```
 
 Capture saves a record. It does not create a timed reminder. `jared-mode` captures explicit loose ends and writes checkpoints at safe boundaries while it remains in context. A standalone `/poteto-mode` session does not automatically invoke the organizer. There are no background hooks or scheduled jobs in this plugin.
+
+Work notes are separate from tasks. Each note retains its source and can be attached to an app or left as general work context. Corrections supersede an earlier note while preserving its history; archived and superseded notes stay out of normal recall. A review date means “revisit this detail,” not that the detail expires or a notification is scheduled.
 
 ## Local CLI
 
@@ -84,6 +92,12 @@ python3 scripts/organizer.py checkpoint add demo \
   --next-action 'Implement the smallest fix and rerun the reproduction' \
   --branch fix/startup --evidence 'Lab reproduction reproduced the failure'
 python3 scripts/organizer.py resume demo
+python3 scripts/organizer.py note add 'API decision' \
+  --kind decision --app demo \
+  --body 'Keep one inspectable endpoint for the first release.' \
+  --source 'User decision in the current session' --key demo-api-decision
+python3 scripts/organizer.py note list --app demo --query endpoint
+python3 scripts/organizer.py morning --minutes 90
 ```
 
 All successful commands return JSON. Use `--help` at any level for the complete interface. The runtime never executes a saved verification or maintenance instruction and never connects to GitHub, GitLab, Jira, or a cluster. `maintain-app` uses the host agent's available tools and records its findings through the CLI. Missing access is reported as unknown, never healthy.
@@ -98,6 +112,8 @@ python3 scripts/organizer.py --workspace work today
 ```
 
 Workspaces have separate databases. Keep work records in their approved environment and personal records on your own machine. Workspace separation is organizational, not an access-control boundary or encryption mechanism. The directory and database use private permissions where supported by the operating system. There is no automatic cloud synchronization.
+
+After updating from version 0.1.0, run `init` with the same home and workspace to upgrade the existing store to schema version 2. This preserves apps, tasks, checkpoints, reviews, and capture keys. Commands encountering an older store ask for this explicit upgrade. New exports include work notes; imports also accept version-one snapshots into an empty version-two workspace.
 
 The store is independent of the plugin checkout, so replacing or updating the plugin preserves your records. Do not put a data root or export in this public fork. The runtime rejects stores inside this repository. Check the selected workspace before capturing or exporting data.
 

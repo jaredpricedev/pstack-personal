@@ -15,11 +15,15 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 
-SCHEMA_VERSION = 1
-TABLES = ("apps", "tasks", "checkpoints", "reviews")
+SCHEMA_VERSION = 2
+LEGACY_TABLES = ("apps", "tasks", "checkpoints", "reviews")
+TABLES = (*LEGACY_TABLES, "notes")
+CAPTURE_TABLES = ("tasks", "checkpoints", "reviews", "notes")
 STATUSES = ("todo", "doing", "waiting", "blocked", "done", "cancelled")
 KINDS = ("commitment", "idea")
 PRIORITIES = ("low", "normal", "high")
+NOTE_KINDS = ("fact", "decision", "context")
+NOTE_STATUSES = ("current", "superseded", "archived")
 FINISHED = ("done", "cancelled")
 INACTIVE_STAGES = ("paused", "archived")
 IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -152,6 +156,8 @@ def connect(db, readonly=False):
     version = connection.execute("PRAGMA user_version").fetchone()[0]
     if version != SCHEMA_VERSION:
         connection.close()
+        if version == 1:
+            raise InputError("Workspace schema 1 needs an upgrade; rerun init with the same --home and --workspace")
         raise InputError(f"Unsupported database schema {version}; expected {SCHEMA_VERSION}")
     return connection
 
@@ -169,7 +175,7 @@ def initialize(directory, db, workspace):
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("BEGIN IMMEDIATE")
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, SCHEMA_VERSION):
+        if version not in (0, 1, SCHEMA_VERSION):
             raise InputError(f"Unsupported database schema {version}")
         if version == 0:
             if connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchone():
@@ -178,6 +184,8 @@ def initialize(directory, db, workspace):
             connection.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, app_id TEXT REFERENCES apps(id), capture_key TEXT UNIQUE, request TEXT, body TEXT NOT NULL)")
             connection.execute("CREATE TABLE checkpoints (id TEXT PRIMARY KEY, app_id TEXT NOT NULL REFERENCES apps(id), capture_key TEXT UNIQUE, request TEXT, body TEXT NOT NULL)")
             connection.execute("CREATE TABLE reviews (id TEXT PRIMARY KEY, app_id TEXT NOT NULL REFERENCES apps(id), capture_key TEXT UNIQUE, request TEXT, body TEXT NOT NULL)")
+        if version in (0, 1):
+            connection.execute("CREATE TABLE notes (id TEXT PRIMARY KEY, app_id TEXT REFERENCES apps(id), supersedes TEXT REFERENCES notes(id) DEFERRABLE INITIALLY DEFERRED, capture_key TEXT UNIQUE, request TEXT, body TEXT NOT NULL)")
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     if os.name != "nt":
         directory.chmod(0o700)
@@ -199,6 +207,11 @@ def get(connection, table, record_id):
 def save(connection, table, record, request=None):
     if table == "apps":
         connection.execute("INSERT INTO apps (id,body) VALUES (?,?)", (record["id"], canonical(record)))
+    elif table == "notes":
+        connection.execute(
+            "INSERT INTO notes (id,app_id,supersedes,capture_key,request,body) VALUES (?,?,?,?,?,?)",
+            (record["id"], record["app_id"], record["supersedes"], record.get("key"), canonical(request) if request is not None else None, canonical(record)),
+        )
     else:
         connection.execute(
             f"INSERT INTO {table} (id,app_id,capture_key,request,body) VALUES (?,?,?,?,?)",
@@ -213,7 +226,7 @@ def replace(connection, table, record):
         connection.execute(f"UPDATE {table} SET app_id=?,body=? WHERE id=?", (record["app_id"], canonical(record), record["id"]))
 
 
-def keyed_capture(connection, table, payload, prefix):
+def existing_capture(connection, table, payload):
     key = payload.get("key")
     if key is not None:
         row = connection.execute(f"SELECT body,request FROM {table} WHERE capture_key=?", (key,)).fetchone()
@@ -221,6 +234,13 @@ def keyed_capture(connection, table, payload, prefix):
             if canonical(decode(row["request"], table)) != canonical(payload):
                 raise InputError(f"Capture key {key!r} already identifies a different request; use an update or a new key")
             return decode(row["body"], table)
+    return None
+
+
+def keyed_capture(connection, table, payload, prefix):
+    existing = existing_capture(connection, table, payload)
+    if existing is not None:
+        return existing
     current = timestamp()
     record = {"id": f"{prefix}-{uuid4().hex}", **payload, "created_at": current, "updated_at": current}
     save(connection, table, record, payload)
@@ -342,6 +362,108 @@ def validate_note(record, kind):
     return record
 
 
+def validate_work_note(record):
+    identifier(record["id"], "note ID")
+    for field in ("title", "body", "source"):
+        record[field] = text(record[field], field)
+    if record["app_id"] is not None:
+        identifier(record["app_id"], "app ID")
+    if record["kind"] not in NOTE_KINDS or record["status"] not in NOTE_STATUSES:
+        raise InputError("Invalid note kind or status")
+    record["review_on"] = iso_date(record["review_on"], "review-on")
+    if record["supersedes"] is not None:
+        identifier(record["supersedes"], "superseded note ID")
+    record["key"] = text(record["key"], "key", optional=True)
+    return record
+
+
+def validate_corrections(notes):
+    by_id = {note["id"]: note for note in notes}
+    successors = {}
+    for note in notes:
+        previous_id = note["supersedes"]
+        if previous_id is None:
+            continue
+        previous = by_id.get(previous_id)
+        if previous is None:
+            raise InputError("Note correction references an unknown note")
+        if previous["app_id"] != note["app_id"]:
+            raise InputError("Note corrections must stay within the same app")
+        if previous_id in successors:
+            raise InputError("A note cannot have more than one correction")
+        successors[previous_id] = note["id"]
+        if previous["status"] == "current":
+            raise InputError("A corrected note must be superseded or archived")
+    for note in notes:
+        if note["status"] == "superseded" and note["id"] not in successors:
+            raise InputError("A superseded note must have a correction")
+    visited = set()
+    for note in notes:
+        cursor = note["id"]
+        chain = set()
+        while cursor is not None and cursor not in visited:
+            if cursor in chain:
+                raise InputError("Note corrections must not contain a cycle")
+            chain.add(cursor)
+            cursor = by_id[cursor]["supersedes"]
+        visited.update(chain)
+
+
+def work_note_payload(args):
+    payload = {
+        "title": args.title,
+        "body": args.body,
+        "source": args.source,
+        "kind": args.kind,
+        "app_id": args.app,
+        "review_on": args.review_on,
+        "supersedes": args.supersedes,
+        "status": "current",
+        "key": args.key,
+    }
+    probe = validate_work_note({"id": "note-validation", **payload})
+    probe.pop("id")
+    return probe
+
+
+def handle_work_note(connection, args):
+    if args.action == "list":
+        if args.app:
+            check_app(connection, args.app)
+        query = text(args.query, "query").casefold() if args.query is not None else None
+        return [
+            note for note in records(connection, "notes")
+            if note["status"] == args.status
+            and (not args.app or note["app_id"] == args.app)
+            and (not args.kind or note["kind"] == args.kind)
+            and (query is None or query in "\n".join(note[field] for field in ("title", "body", "source")).casefold())
+        ]
+    if args.action == "show":
+        return get(connection, "notes", args.id)
+    if args.action == "archive":
+        note = get(connection, "notes", args.id)
+        if note["status"] != "archived":
+            note = {**note, "status": "archived", "updated_at": timestamp()}
+            replace(connection, "notes", note)
+        return note
+    payload = work_note_payload(args)
+    check_app(connection, payload["app_id"])
+    existing = existing_capture(connection, "notes", payload)
+    if existing is not None:
+        return existing
+    previous = None
+    if payload["supersedes"] is not None:
+        previous = get(connection, "notes", payload["supersedes"])
+        if previous["status"] != "current":
+            raise InputError("Only a current note can be superseded; correct its latest current successor")
+        if previous["app_id"] != payload["app_id"]:
+            raise InputError("Note corrections must stay within the same app")
+    note = keyed_capture(connection, "notes", payload, "note")
+    if previous is not None:
+        replace(connection, "notes", {**previous, "status": "superseded", "updated_at": note["created_at"]})
+    return note
+
+
 def latest(items, app_id):
     candidates = [item for item in items if item["app_id"] == app_id]
     return max(candidates, key=lambda item: (item["created_at"], item["id"]), default=None)
@@ -413,21 +535,49 @@ def today(connection, args, workspace):
     return {"date": day, "workspace": workspace, "picked": picked, "overdue": sorted(overdue, key=sort_key), "follow_ups": sorted(follow_ups, key=sort_key), "deferred": deferred, "idea_count": sum(task["kind"] == "idea" and task["status"] not in FINISHED for task in tasks), "stale_projects": stale}
 
 
+def morning(connection, args):
+    plan = today(connection, args, args.workspace)
+    tasks = records(connection, "tasks")
+    checkpoints = records(connection, "checkpoints")
+    reviews = records(connection, "reviews")
+    apps = [
+        {
+            "app": app,
+            "checkpoint": latest(checkpoints, app["id"]),
+            "review": latest(reviews, app["id"]),
+            "open_task_count": sum(task["app_id"] == app["id"] and task["status"] not in FINISHED for task in tasks),
+        }
+        for app in records(connection, "apps")
+    ]
+    notes = [note for note in records(connection, "notes") if note["status"] == "current" and note["review_on"] is not None and note["review_on"] <= plan["date"]]
+    return {
+        "workspace": args.workspace,
+        "date": plan["date"],
+        "coverage": "ledger-only",
+        "plan": plan,
+        "apps": apps,
+        "notes_to_review": sorted(notes, key=lambda note: (note["review_on"], note["created_at"], note["id"])),
+    }
+
+
 def export_snapshot(connection, workspace):
     captures = {
         table: {
             row["capture_key"]: decode(row["request"], table)
             for row in connection.execute(f"SELECT capture_key,request FROM {table} WHERE capture_key IS NOT NULL")
         }
-        for table in ("tasks", "checkpoints", "reviews")
+        for table in CAPTURE_TABLES
     }
     return {"schema_version": SCHEMA_VERSION, "workspace": workspace, "exported_at": timestamp(), **{table: records(connection, table) for table in TABLES}, "capture_requests": captures}
 
 
 def validate_snapshot(snapshot):
-    if not isinstance(snapshot, dict) or snapshot.get("schema_version") != SCHEMA_VERSION or type(snapshot.get("schema_version")) is not int:
-        raise InputError("Import must be an organizer export with schema_version 1")
-    expected = {"schema_version", "workspace", "exported_at", "capture_requests", *TABLES}
+    if not isinstance(snapshot, dict) or type(snapshot.get("schema_version")) is not int or snapshot["schema_version"] not in (1, SCHEMA_VERSION):
+        raise InputError("Import must be an organizer export with schema_version 1 or 2")
+    importing_v1 = snapshot["schema_version"] == 1
+    tables = LEGACY_TABLES if importing_v1 else TABLES
+    capture_tables = CAPTURE_TABLES[:-1] if importing_v1 else CAPTURE_TABLES
+    expected = {"schema_version", "workspace", "exported_at", "capture_requests", *tables}
     if set(snapshot) != expected:
         raise InputError("Import contains missing or unknown top-level fields")
     identifier(snapshot["workspace"], "export workspace")
@@ -436,8 +586,9 @@ def validate_snapshot(snapshot):
     task_fields = {"id", "app_id", "title", "kind", "status", "priority", "source", "next_action", "due", "follow_up", "waiting_on", "depends_on", "external", "key", "estimate", "estimate_source", "evidence", "created_at", "updated_at"}
     checkpoint_fields = {"id", "app_id", "summary", "next_action", "branch", "commit", "pr", "evidence", "decisions", "key", "created_at", "updated_at"}
     review_fields = {"id", "app_id", "summary", "findings", "evidence", "key", "created_at", "updated_at"}
-    fields = dict(zip(TABLES, (app_fields, task_fields, checkpoint_fields, review_fields)))
-    for table in TABLES:
+    work_note_fields = {"id", "title", "body", "kind", "app_id", "source", "review_on", "supersedes", "status", "key", "created_at", "updated_at"}
+    fields = dict(zip(TABLES, (app_fields, task_fields, checkpoint_fields, review_fields, work_note_fields)))
+    for table in tables:
         if not isinstance(snapshot[table], list):
             raise InputError(f"Import {table} must be an array")
         seen, keys = set(), set()
@@ -448,10 +599,14 @@ def validate_snapshot(snapshot):
                 validate_app(record)
             elif table == "tasks":
                 validate_task(record)
+            elif table == "notes":
+                validate_work_note(record)
             else:
                 validate_note(record, "checkpoint" if table == "checkpoints" else "review")
             for field in ("created_at", "updated_at"):
                 checked_timestamp(record[field], field)
+            if datetime.fromisoformat(record["updated_at"].replace("Z", "+00:00")) < datetime.fromisoformat(record["created_at"].replace("Z", "+00:00")):
+                raise InputError("Import updated_at must not precede created_at")
             if record["id"] in seen:
                 raise InputError(f"Import contains duplicate {table} ID {record['id']!r}")
             seen.add(record["id"])
@@ -460,15 +615,17 @@ def validate_snapshot(snapshot):
                     raise InputError(f"Import contains duplicate {table} capture key")
                 keys.add(record["key"])
     app_ids = {record["id"] for record in snapshot["apps"]}
-    for table in ("tasks", "checkpoints", "reviews"):
+    for table in capture_tables:
         for record in snapshot[table]:
             if record["app_id"] is not None and record["app_id"] not in app_ids:
                 raise InputError(f"Import {table} references an unknown app")
     validate_graph(snapshot["tasks"])
+    if not importing_v1:
+        validate_corrections(snapshot["notes"])
     captures = snapshot["capture_requests"]
-    if not isinstance(captures, dict) or set(captures) != {"tasks", "checkpoints", "reviews"}:
-        raise InputError("Import capture_requests must contain tasks, checkpoints and reviews")
-    for table in ("tasks", "checkpoints", "reviews"):
+    if not isinstance(captures, dict) or set(captures) != set(capture_tables):
+        raise InputError("Import capture_requests must match the export schema's record tables")
+    for table in capture_tables:
         requests = captures[table]
         expected_keys = {record["key"] for record in snapshot[table] if record["key"] is not None}
         if not isinstance(requests, dict) or set(requests) != expected_keys:
@@ -480,12 +637,22 @@ def validate_snapshot(snapshot):
             probe = {"id": "capture-validation", **request}
             if table == "tasks":
                 validate_task(probe)
+            elif table == "notes":
+                validate_work_note(probe)
+                captured = next(record for record in snapshot["notes"] if record["key"] == key)
+                immutable_fields = request_fields - {"status"}
+                if probe["status"] != "current" or any(probe[field] != captured[field] for field in immutable_fields):
+                    raise InputError("Original note capture request must preserve its immutable content")
             else:
                 validate_note(probe, "checkpoint" if table == "checkpoints" else "review")
             if probe["app_id"] is not None and probe["app_id"] not in app_ids:
                 raise InputError("Original capture request references an unknown app")
             if table == "tasks" and any(dependency not in {task["id"] for task in snapshot["tasks"]} for dependency in probe["depends_on"]):
                 raise InputError("Original capture request references an unknown task")
+    if importing_v1:
+        snapshot["notes"] = []
+        snapshot["capture_requests"]["notes"] = {}
+        snapshot["schema_version"] = SCHEMA_VERSION
     return snapshot
 
 
@@ -508,6 +675,8 @@ def import_snapshot(connection, args, workspace):
 
 
 def handle(connection, args):
+    if args.command == "note":
+        return handle_work_note(connection, args)
     if args.command == "app":
         if args.action == "list":
             return records(connection, "apps")
@@ -565,6 +734,8 @@ def handle(connection, args):
         return {"app": app, "checkpoint": latest(records(connection, "checkpoints"), args.app), "tasks": [task for task in records(connection, "tasks") if task["app_id"] == args.app and task["status"] not in FINISHED], "review": latest(records(connection, "reviews"), args.app)}
     if args.command == "today":
         return today(connection, args, args.workspace)
+    if args.command == "morning":
+        return morning(connection, args)
     if args.command == "export":
         return export_snapshot(connection, args.workspace)
     if args.command == "import":
@@ -604,7 +775,7 @@ def build_parser():
     parser.add_argument("--home", default=os.environ.get("PSTACK_ORGANIZER_HOME", str(Path.home() / ".local" / "share" / "pstack-organizer")), help="Private state directory; defaults to PSTACK_ORGANIZER_HOME or ~/.local/share/pstack-organizer")
     parser.add_argument("--workspace", default=os.environ.get("PSTACK_ORGANIZER_WORKSPACE", "personal"), help="Isolated workspace ID (default: personal)")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("init", help="Initialize an empty workspace; safe to repeat")
+    commands.add_parser("init", help="Initialize or upgrade a workspace; safe to repeat")
     app = commands.add_parser("app", help="Manage the app registry").add_subparsers(dest="action", required=True)
     add_app_arguments(app.add_parser("add"), required=True)
     add_app_arguments(app.add_parser("update"))
@@ -618,6 +789,21 @@ def build_parser():
     task_list.add_argument("--status", choices=STATUSES)
     task_list.add_argument("--kind", choices=KINDS)
     task.add_parser("show").add_argument("id")
+    note = commands.add_parser("note", help="Keep durable work context and append-only corrections").add_subparsers(dest="action", required=True)
+    note_add = note.add_parser("add")
+    note_add.add_argument("title")
+    note_add.add_argument("--body", required=True)
+    note_add.add_argument("--source", required=True)
+    note_add.add_argument("--kind", choices=NOTE_KINDS, default="context")
+    for option in ("app", "review-on", "supersedes", "key"):
+        note_add.add_argument(f"--{option}")
+    note_list = note.add_parser("list")
+    note_list.add_argument("--app")
+    note_list.add_argument("--kind", choices=NOTE_KINDS)
+    note_list.add_argument("--query")
+    note_list.add_argument("--status", choices=NOTE_STATUSES, default="current")
+    note.add_parser("show").add_argument("id")
+    note.add_parser("archive").add_argument("id")
     for kind in ("checkpoint", "review"):
         action = commands.add_parser(kind).add_subparsers(dest="action", required=True).add_parser("add")
         action.add_argument("app")
@@ -632,10 +818,11 @@ def build_parser():
         else:
             action.add_argument("--finding", action="append")
     commands.add_parser("resume").add_argument("app")
-    daily = commands.add_parser("today", help="Choose a small worklist without changing any tasks")
-    daily.add_argument("--date")
-    daily.add_argument("--limit", type=int, default=3)
-    daily.add_argument("--minutes", type=int)
+    for command, description in (("today", "Choose a small worklist without changing tasks"), ("morning", "Read the daily worklist, app handoffs and notes needing review")):
+        daily = commands.add_parser(command, help=description)
+        daily.add_argument("--date")
+        daily.add_argument("--limit", type=int, default=3)
+        daily.add_argument("--minutes", type=int)
     commands.add_parser("export", help="Write a versioned JSON snapshot to stdout; store it privately")
     commands.add_parser("import", help="Restore a JSON snapshot into an initialized, empty workspace").add_argument("--file", required=True)
     return parser
@@ -648,7 +835,7 @@ def main(argv=None):
         if args.command == "init":
             result = initialize(directory, db, args.workspace)
         else:
-            readonly = args.command in ("resume", "today", "export") or args.command in ("app", "task") and args.action in ("list", "show")
+            readonly = args.command in ("resume", "today", "morning", "export") or args.command in ("app", "task", "note") and args.action in ("list", "show")
             connection = connect(db, readonly)
             try:
                 connection.execute("BEGIN" if readonly else "BEGIN IMMEDIATE")
